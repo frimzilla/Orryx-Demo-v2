@@ -24,7 +24,6 @@ jobs:
           DIR=$(dirname "$FILE")
           echo "Found package.json at: $FILE"
           echo "PROJECT_DIR=$DIR" >> $GITHUB_ENV
-          echo "project_dir=$DIR" >> $GITHUB_OUTPUT
           ls -la "$DIR"
 
       - name: Setup Node
@@ -34,8 +33,7 @@ jobs:
 
       - name: Install dependencies
         working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          npm install --no-audit --no-fund
+        run: npm install --no-audit --no-fund
 
       - name: Validate required assets
         working-directory: ${{ env.PROJECT_DIR }}
@@ -55,19 +53,29 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: npx --yes expo-doctor
 
-      - name: EAS Build (Android internal APK)
-        working-directory: ${{ env.PROJECT_DIR }}
-        run: eas build -p android --profile internal --non-interactive
+      # Early fail if EXPO_TOKEN is not configured on this repo
+      - name: Verify EXPO_TOKEN is present
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "::error::EXPO_TOKEN secret is missing. Add it in GitHub → Settings → Secrets → Actions."
+            exit 1
+          fi
+
+      - name: EAS Build (Android internal APK)
+        working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: npx --yes eas-cli@latest build -p android --profile internal --non-interactive
 
       - name: Download latest build artifact
         working-directory: ${{ env.PROJECT_DIR }}
-        run: |
-          mkdir -p dist
-          eas build:download --platform android --latest --output dist/
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          mkdir -p dist
+          npx --yes eas-cli@latest build:download --platform android --latest --output dist/
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
