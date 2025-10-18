@@ -1,0 +1,76 @@
+name: Build Android Internal APK (EAS)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-android-internal:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Detect project directory (package.json)
+        id: detect
+        run: |
+          set -e
+          echo "Workspace: $GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          FILE=$(git ls-files -- ':/*package.json' | head -n1 || true)
+          if [ -z "$FILE" ]; then
+            echo "::error::package.json not found anywhere in repo."
+            exit 1
+          fi
+          DIR=$(dirname "$FILE")
+          echo "Found package.json at: $FILE"
+          echo "PROJECT_DIR=$DIR" >> $GITHUB_ENV
+          echo "project_dir=$DIR" >> $GITHUB_OUTPUT
+          ls -la "$DIR"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          npm install --no-audit --no-fund
+
+      - name: Validate required assets
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          set -e
+          for f in assets/icon.png assets/adaptive-icon.png assets/splash.png; do
+            if [ ! -s "$f" ]; then
+              echo "::error file=$f::Missing or empty. Provide a real PNG."
+              exit 1
+            fi
+            mime=$(file -b --mime-type "$f" || true)
+            echo "$f -> $mime"
+            echo "$mime" | grep -q "image/png" || { echo "::error file=$f::Not a PNG"; exit 1; }
+          done
+
+      - name: Expo Doctor
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: npx --yes expo-doctor
+
+      - name: EAS Build (Android internal APK)
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: eas build -p android --profile internal --non-interactive
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Download latest build artifact
+        working-directory: ${{ env.PROJECT_DIR }}
+        run: |
+          mkdir -p dist
+          eas build:download --platform android --latest --output dist/
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: orryx-internal-apk
+          path: ${{ env.PROJECT_DIR }}/dist/*.apk
