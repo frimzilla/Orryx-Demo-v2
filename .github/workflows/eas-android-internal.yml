@@ -31,12 +31,18 @@ jobs:
         with:
           node-version: '20'
 
-      # ✅ Install and cache EAS CLI + authenticate with your token
+      # ✅ Install & cache Expo/EAS CLI and authenticate with your token
       - name: Setup Expo/EAS
         uses: expo/expo-github-action@v8
         with:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
+
+      # Quick sanity check — proves EAS CLI is on PATH
+      - name: Check EAS CLI
+        run: |
+          which eas || { echo "::error::EAS CLI not found on PATH"; exit 1; }
+          eas --version
 
       - name: Install dependencies
         working-directory: ${{ env.PROJECT_DIR }}
