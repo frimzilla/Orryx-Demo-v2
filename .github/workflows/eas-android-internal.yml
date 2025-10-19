@@ -11,7 +11,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Detect where package.json lives (works even if nested)
+      # Find where package.json lives (works even if nested)
       - name: Detect project directory
         id: detect
         run: |
@@ -30,19 +30,6 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      # ✅ Install & cache Expo/EAS CLI and authenticate with your token
-      - name: Setup Expo/EAS
-        uses: expo/expo-github-action@v8
-        with:
-          eas-version: latest
-          token: ${{ secrets.EXPO_TOKEN }}
-
-      # Quick sanity check — proves EAS CLI is on PATH
-      - name: Check EAS CLI
-        run: |
-          which eas || { echo "::error::EAS CLI not found on PATH"; exit 1; }
-          eas --version
 
       - name: Install dependencies
         working-directory: ${{ env.PROJECT_DIR }}
@@ -66,15 +53,33 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: npx --yes expo-doctor
 
+      # Fail early if EXPO_TOKEN is missing
+      - name: Verify EXPO_TOKEN is present
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          if [ -z "$EXPO_TOKEN" ]; then
+            echo "::error::EXPO_TOKEN secret is missing. Add it in GitHub → Settings → Secrets → Actions."
+            exit 1
+          fi
+
+      # Install EAS CLI via npx (prints version so we know it's on PATH)
+      - name: Install EAS CLI (npx)
+        run: npx --yes eas-cli@latest --version
+
       - name: EAS Build (Android internal APK)
         working-directory: ${{ env.PROJECT_DIR }}
-        run: eas build -p android --profile internal --non-interactive
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: npx --yes eas-cli@latest build -p android --profile internal --non-interactive
 
       - name: Download latest build artifact
         working-directory: ${{ env.PROJECT_DIR }}
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
           mkdir -p dist
-          eas build:download --platform android --latest --output dist/
+          npx --yes eas-cli@latest build:download --platform android --latest --output dist/
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
