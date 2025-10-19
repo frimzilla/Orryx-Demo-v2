@@ -1,673 +1,783 @@
-import React, { useMemo, useRef, useState, useEffect } from "react";
-import {
-  SafeAreaView,
-  View,
-  Text,
-  ScrollView,
-  Pressable,
-  TextInput,
-  RefreshControl,
-  Animated,
-  Easing,
-  StatusBar,
-  Dimensions,
-  Modal,
-} from "react-native";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
-const { width: SCREEN_W } = Dimensions.get("window");
+// Orryx UI Lab – Food•Mood Demo (v0.1)
+// Single-file React component with an in-memory restaurant DB, Food→Mood logic,
+// Random / Food-Mood / Find It flows, fake order + post-meal rating chip sheet,
+// and a ranking algorithm that prioritizes: new-to-user best match first,
+// then most-loved familiar, alternating loved / new until loved runs out.
+// Tailwind CSS only for styling (no external UI libs required).
 
-// Minimal theme (self-contained)
-const theme = {
-  bg: "#0B0F1A",
-  surface: "#111827",
-  surface2: "#0F1523",
-  text: "#E5EDF5",
-  muted: "#93A4B8",
-  primary: "#9CC9FF",
-  accent: "#7C3AED",
-  accentDim: "#6D28D9",
-  success: "#10B981",
-  danger: "#EF4444",
-  yellow: "#FBBF24",
-  dot: "#334155",
-  dotActive: "#9CC9FF",
-  radius: 16,
+// ————— Types & Constants —————
+const MOODS = ["Joy", "Calm", "Energized", "Warm", "Upset"] as const;
+type Mood = typeof MOODS[number];
+
+const TAGS = [
+  "steak",
+  "sushi",
+  "pizza",
+  "salad",
+  "ramen",
+  "tacos",
+  "bbq",
+  "vegan",
+  "burger",
+  "coffee",
+  "noodles",
+  "pho",
+  "seafood",
+  "curry",
+  "shawarma",
+];
+
+type Restaurant = {
+  id: string;
+  name: string;
+  cuisine: string;
+  tags: string[]; // for predictive search & filter chips
+  moodScores: Record<Mood, number>; // base association 0–1
+  price: "$" | "$$" | "$$$" | "$$$$";
+  location: string;
+  img?: string; // optional placeholder image
 };
 
-// Shared bits
-const Card = ({ children, style }) => (
-  <View
-    style={[
-      {
-        backgroundColor: theme.surface,
-        borderRadius: theme.radius,
-        padding: 20,
-        shadowColor: "#000",
-        shadowOpacity: 0.2,
-        shadowRadius: 8,
-        shadowOffset: { width: 0, height: 4 },
-        elevation: 4,
-      },
-      style,
-    ]}
-  >
-    {children}
-  </View>
-);
+type UserPrefs = {
+  favorites: Set<string>;
+  // per-mood per-restaurant affinity learned from ratings
+  affinity: Record<Mood, Record<string, number>>; // mood->restId->score
+  // per-restaurant rating counts by mood (for “loved” detection)
+  counts: Record<Mood, Record<string, number>>;
+  // restaurants the user has interacted with (ordered or rated)
+  seen: Set<string>;
+};
 
-const SectionTitle = ({ children }) => (
-  <Text style={{ color: theme.primary, fontSize: 20, fontWeight: "700", marginBottom: 10 }}>
-    {children}
-  </Text>
-);
+// Simple seeded DB (15 restaurants). Each mood will still surface a Top-5.
+const DB: Restaurant[] = [
+  {
+    id: "r_steakhouse_prime",
+    name: "Prime Forge Steakhouse",
+    cuisine: "Steakhouse",
+    tags: ["steak", "bbq", "wine"],
+    moodScores: { Joy: 0.92, Calm: 0.38, Energized: 0.55, Warm: 0.88, Upset: 0.40 },
+    price: "$$$$",
+    location: "Downtown",
+  },
+  {
+    id: "r_bbq_smoke",
+    name: "Smokestack & Ember BBQ",
+    cuisine: "BBQ",
+    tags: ["bbq", "steak", "ribs"],
+    moodScores: { Joy: 0.84, Calm: 0.32, Energized: 0.71, Warm: 0.86, Upset: 0.44 },
+    price: "$$$",
+    location: "Riverside",
+  },
+  {
+    id: "r_sushi_kumo",
+    name: "Kumo Sushi Bar",
+    cuisine: "Sushi",
+    tags: ["sushi", "seafood"],
+    moodScores: { Joy: 0.80, Calm: 0.78, Energized: 0.49, Warm: 0.36, Upset: 0.40 },
+    price: "$$$",
+    location: "Midtown",
+  },
+  {
+    id: "r_pizza_nebula",
+    name: "Nebula Pizza Lab",
+    cuisine: "Pizza",
+    tags: ["pizza", "salad"],
+    moodScores: { Joy: 0.86, Calm: 0.35, Energized: 0.64, Warm: 0.70, Upset: 0.33 },
+    price: "$$",
+    location: "Uptown",
+  },
+  {
+    id: "r_ramen_tsuki",
+    name: "Tsuki Ramen",
+    cuisine: "Ramen",
+    tags: ["ramen", "noodles"],
+    moodScores: { Joy: 0.72, Calm: 0.40, Energized: 0.58, Warm: 0.92, Upset: 0.41 },
+    price: "$$",
+    location: "Downtown",
+  },
+  {
+    id: "r_tacos_cielo",
+    name: "Cielo Taquería",
+    cuisine: "Mexican",
+    tags: ["tacos", "curry"],
+    moodScores: { Joy: 0.77, Calm: 0.30, Energized: 0.86, Warm: 0.62, Upset: 0.45 },
+    price: "$$",
+    location: "Market District",
+  },
+  {
+    id: "r_salad_blossom",
+    name: "Blossom Greens",
+    cuisine: "Salads & Bowls",
+    tags: ["salad", "vegan"],
+    moodScores: { Joy: 0.66, Calm: 0.82, Energized: 0.48, Warm: 0.52, Upset: 0.43 },
+    price: "$$",
+    location: "Arts Quarter",
+  },
+  {
+    id: "r_burger_aster",
+    name: "Aster Burger Co.",
+    cuisine: "Burgers",
+    tags: ["burger", "steak"],
+    moodScores: { Joy: 0.81, Calm: 0.34, Energized: 0.83, Warm: 0.68, Upset: 0.40 },
+    price: "$$",
+    location: "Stadium Row",
+  },
+  {
+    id: "r_pho_sunrise",
+    name: "Sunrise Pho House",
+    cuisine: "Vietnamese",
+    tags: ["pho", "noodles"],
+    moodScores: { Joy: 0.70, Calm: 0.60, Energized: 0.50, Warm: 0.90, Upset: 0.55 },
+    price: "$",
+    location: "Little Asia",
+  },
+  {
+    id: "r_curry_mirror",
+    name: "Mirror Spice Curry",
+    cuisine: "Indian",
+    tags: ["curry", "vegan"],
+    moodScores: { Joy: 0.74, Calm: 0.42, Energized: 0.78, Warm: 0.74, Upset: 0.47 },
+    price: "$$",
+    location: "Grand Ave",
+  },
+  {
+    id: "r_shawarma_orbit",
+    name: "Orbit Shawarma",
+    cuisine: "Middle Eastern",
+    tags: ["shawarma", "salad"],
+    moodScores: { Joy: 0.69, Calm: 0.58, Energized: 0.63, Warm: 0.82, Upset: 0.46 },
+    price: "$",
+    location: "Bazaar Street",
+  },
+  {
+    id: "r_seafood_tide",
+    name: "High Tide Oyster & Fish",
+    cuisine: "Seafood",
+    tags: ["seafood", "sushi"],
+    moodScores: { Joy: 0.75, Calm: 0.76, Energized: 0.54, Warm: 0.50, Upset: 0.38 },
+    price: "$$$",
+    location: "Harbor",
+  },
+  {
+    id: "r_bbq_backyard",
+    name: "Backyard Smoke Pit",
+    cuisine: "BBQ",
+    tags: ["bbq", "ribs"],
+    moodScores: { Joy: 0.78, Calm: 0.28, Energized: 0.79, Warm: 0.84, Upset: 0.49 },
+    price: "$$",
+    location: "Warehouse Row",
+  },
+  {
+    id: "r_cafe_zenith",
+    name: "Cafe Zenith",
+    cuisine: "Coffee & Light Bites",
+    tags: ["coffee", "salad"],
+    moodScores: { Joy: 0.63, Calm: 0.88, Energized: 0.57, Warm: 0.48, Upset: 0.35 },
+    price: "$",
+    location: "Campus",
+  },
+  {
+    id: "r_noodle_meteor",
+    name: "Meteor Noodle Works",
+    cuisine: "Pan-Asian Noodles",
+    tags: ["noodles", "ramen", "pho"],
+    moodScores: { Joy: 0.71, Calm: 0.55, Energized: 0.69, Warm: 0.80, Upset: 0.43 },
+    price: "$$",
+    location: "The Crossings",
+  },
+];
 
-const Chip = ({ label, selected, onPress }) => (
-  <Pressable
-    onPress={onPress}
-    style={{
-      backgroundColor: selected ? theme.accent : theme.surface2,
-      borderRadius: 999,
-      paddingVertical: 8,
-      paddingHorizontal: 14,
-      marginRight: 10,
-      marginBottom: 10,
-      borderWidth: 1,
-      borderColor: selected ? theme.accent : "#1f2937",
-    }}
-  >
-    <Text style={{ color: selected ? "white" : theme.text, fontWeight: "600" }}>{label}</Text>
-  </Pressable>
-);
+const DEFAULT_USER: UserPrefs = {
+  favorites: new Set<string>(),
+  affinity: Object.fromEntries(MOODS.map((m) => [m, {}])) as any,
+  counts: Object.fromEntries(MOODS.map((m) => [m, {}])) as any,
+  seen: new Set<string>(),
+};
 
-// ---------- Feature Pages ----------
+// ————— Helpers —————
+const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+const toPct = (x: number) => `${Math.round(x * 100)}%`;
 
-// 1) Smart Search (mock suggestions + debounce)
-function PageSearch() {
-  const [q, setQ] = useState("");
-  const [suggestions, setSuggestions] = useState([]);
+function useLocalStorage<T>(key: string, initial: T) {
+  const [val, setVal] = useState<T>(() => {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return initial;
+      const parsed = JSON.parse(raw);
+      // revive sets
+      if (parsed.favorites) parsed.favorites = new Set(parsed.favorites);
+      if (parsed.seen) parsed.seen = new Set(parsed.seen);
+      return parsed;
+    } catch {
+      return initial;
+    }
+  });
   useEffect(() => {
-    const t = setTimeout(() => {
-      if (!q) return setSuggestions([]);
-      const base = ["Pizza", "Sushi", "Tacos", "BBQ", "Vegan", "Coffee", "Noodles", "Burgers"];
-      setSuggestions(base.filter((x) => x.toLowerCase().includes(q.toLowerCase())).slice(0, 5));
-    }, 250);
-    return () => clearTimeout(t);
-  }, [q]);
-
-  return (
-    <Card>
-      <SectionTitle>Smart Search</SectionTitle>
-      <Text style={{ color: theme.muted, marginBottom: 10 }}>
-        Debounced, with quick suggestions (mocked locally).
-      </Text>
-      <View
-        style={{
-          backgroundColor: theme.surface2,
-          borderRadius: 12,
-          paddingHorizontal: 12,
-          paddingVertical: 10,
-          borderWidth: 1,
-          borderColor: "#1f2937",
-        }}
-      >
-        <TextInput
-          value={q}
-          onChangeText={setQ}
-          placeholder="Try 'sushi', 'tacos', 'pizza'…"
-          placeholderTextColor="#6B7280"
-          style={{ color: theme.text, fontSize: 16 }}
-        />
-      </View>
-
-      {suggestions.length > 0 && (
-        <View style={{ marginTop: 12 }}>
-          {suggestions.map((s, i) => (
-            <Pressable
-              key={i}
-              onPress={() => setQ(s)}
-              style={{
-                paddingVertical: 10,
-                paddingHorizontal: 12,
-                borderRadius: 10,
-                backgroundColor: theme.surface2,
-                marginBottom: 8,
-                borderWidth: 1,
-                borderColor: "#1f2937",
-              }}
-            >
-              <Text style={{ color: theme.text }}>{s}</Text>
-            </Pressable>
-          ))}
-        </View>
-      )}
-    </Card>
-  );
+    const replacer = (_k: string, v: any) => {
+      if (v instanceof Set) return Array.from(v);
+      return v;
+    };
+    localStorage.setItem(key, JSON.stringify(val, replacer));
+  }, [key, val]);
+  return [val, setVal] as const;
 }
 
-// 2) Filter Chips (multi-select cuisine tags)
-function PageChips() {
-  const tags = ["Breakfast", "Vegan", "Halal", "Gluten-free", "Spicy", "Open late", "Budget", "Date night"];
-  const [sel, setSel] = useState(new Set(["Vegan"]));
-  return (
-    <Card>
-      <SectionTitle>Filter Chips</SectionTitle>
-      <Text style={{ color: theme.muted, marginBottom: 10 }}>
-        Tap to toggle; selections power your recommendations.
-      </Text>
-      <View style={{ flexDirection: "row", flexWrap: "wrap" }}>
-        {tags.map((t) => {
-          const selected = sel.has(t);
-          return (
-            <Chip
-              key={t}
-              label={t}
-              selected={selected}
-              onPress={() => {
-                const next = new Set(sel);
-                selected ? next.delete(t) : next.add(t);
-                setSel(next);
-              }}
-            />
-          );
-        })}
-      </View>
-    </Card>
-  );
+function scoreForMood(r: Restaurant, mood: Mood, user: UserPrefs) {
+  const base = r.moodScores[mood];
+  const a = user.affinity[mood][r.id] ?? 0; // learned boost 0–1
+  // Weighted blend: prioritize learned signal but never ignore base
+  return clamp01(0.6 * base + 0.6 * a); // can exceed 1 before clamp
 }
 
-// 3) Restaurant Card (rating, favorite toggle)
-function PageCard() {
-  const [fav, setFav] = useState(false);
-  const stars = 4.5;
-  return (
-    <Card>
-      <SectionTitle>Restaurant Card</SectionTitle>
-      <Text style={{ color: theme.text, fontSize: 18, fontWeight: "700" }}>Nana’s Kitchen</Text>
-      <Text style={{ color: theme.muted, marginBottom: 8 }}>Ghanaian • $$ • 1.1 mi</Text>
-      <Text style={{ color: theme.yellow, marginBottom: 14 }}>
-        {"★".repeat(Math.floor(stars))}{"☆".repeat(5 - Math.floor(stars))} {stars.toFixed(1)}
-      </Text>
-      <View style={{ flexDirection: "row", gap: 12 }}>
-        <Pressable
-          onPress={() => setFav((f) => !f)}
-          style={{
-            backgroundColor: fav ? theme.danger : theme.surface2,
-            paddingVertical: 10,
-            paddingHorizontal: 14,
-            borderRadius: 12,
-            borderWidth: 1,
-            borderColor: "#1f2937",
-          }}
-        >
-          <Text style={{ color: fav ? "white" : theme.text, fontWeight: "700" }}>
-            {fav ? "♥ Saved" : "♡ Save"}
-          </Text>
-        </Pressable>
-        <Pressable
-          style={{
-            backgroundColor: theme.accent,
-            paddingVertical: 10,
-            paddingHorizontal: 14,
-            borderRadius: 12,
-          }}
-        >
-          <Text style={{ color: "white", fontWeight: "700" }}>View Menu</Text>
-        </Pressable>
-      </View>
-    </Card>
-  );
+function isLoved(rid: string, mood: Mood, user: UserPrefs) {
+  const c = user.counts[mood][rid] ?? 0;
+  const a = user.affinity[mood][rid] ?? 0;
+  return c >= 2 && a >= 0.6; // simple heuristic for “loved”
 }
 
-// 4) Expandable Text (collapsible details)
-function PageExpandable() {
-  const [open, setOpen] = useState(false);
-  return (
-    <Card>
-      <SectionTitle>Expandable Details</SectionTitle>
-      <Text style={{ color: theme.muted, marginBottom: 8 }}>
-        Tap to show/hide long content without leaving context.
-      </Text>
-      <Pressable
-        onPress={() => setOpen((o) => !o)}
-        style={{
-          backgroundColor: theme.surface2,
-          padding: 14,
-          borderRadius: 12,
-          borderWidth: 1,
-          borderColor: "#1f2937",
-        }}
-      >
-        <Text style={{ color: theme.text, fontWeight: "700", marginBottom: 6 }}>
-          About “Orryx Picks” {open ? "▲" : "▼"}
-        </Text>
-        {open ? (
-          <Text style={{ color: theme.text }}>
-            We combine popularity, proximity, freshness, and your filter history to rank places you’ll
-            likely love. Your picks improve as you explore—privacy-respecting and on-device.
-          </Text>
-        ) : (
-          <Text style={{ color: theme.muted }}>Tap to read how we rank restaurants.</Text>
-        )}
-      </Pressable>
-    </Card>
-  );
-}
-
-// 5) Swipeable Row (reveal actions)
-function PageSwipeRow() {
-  const x = useRef(new Animated.Value(0)).current;
-  const openTo = -120;
-  const toggle = () => {
-    Animated.spring(x, { toValue: x.__getValue() === 0 ? openTo : 0, useNativeDriver: true, bounciness: 6 }).start();
+function updateAffinity(
+  user: UserPrefs,
+  rid: string,
+  moodRated: Mood,
+  amount = 0.25 // EMA step
+): UserPrefs {
+  const next: UserPrefs = {
+    favorites: new Set(user.favorites),
+    seen: new Set(user.seen).add(rid),
+    affinity: JSON.parse(JSON.stringify(user.affinity)),
+    counts: JSON.parse(JSON.stringify(user.counts)),
   };
-  return (
-    <Card>
-      <SectionTitle>Swipeable Row</SectionTitle>
-      <Text style={{ color: theme.muted, marginBottom: 10 }}>Swipe left to reveal actions</Text>
-      <View style={{ height: 64, overflow: "hidden" }}>
-        <View
-          style={{
-            position: "absolute",
-            right: 0,
-            top: 0,
-            bottom: 0,
-            flexDirection: "row",
-            alignItems: "stretch",
-          }}
-        >
-          <View style={{ width: 60, backgroundColor: theme.accent, justifyContent: "center", alignItems: "center" }}>
-            <Text style={{ color: "white" }}>Share</Text>
-          </View>
-          <View style={{ width: 60, backgroundColor: theme.danger, justifyContent: "center", alignItems: "center" }}>
-            <Text style={{ color: "white" }}>Hide</Text>
-          </View>
-        </View>
-
-        <Animated.View
-          style={{
-            transform: [{ translateX: x }],
-            backgroundColor: theme.surface2,
-            borderRadius: 12,
-            borderWidth: 1,
-            borderColor: "#1f2937",
-            height: 64,
-            justifyContent: "center",
-            paddingHorizontal: 14,
-          }}
-        >
-          <Pressable onPress={toggle}>
-            <Text style={{ color: theme.text, fontWeight: "600" }}>“Jollof Palace” — Swipe me</Text>
-          </Pressable>
-        </Animated.View>
-      </View>
-    </Card>
-  );
+  const prev = next.affinity[moodRated][rid] ?? 0.5; // start neutral
+  const ema = clamp01(prev * (1 - amount) + 1 * amount);
+  next.affinity[moodRated][rid] = ema;
+  next.counts[moodRated][rid] = (next.counts[moodRated][rid] ?? 0) + 1;
+  return next;
 }
 
-// 6) Pull-to-Refresh List
-function PageRefresh() {
-  const [refreshing, setRefreshing] = useState(false);
-  const [items, setItems] = useState(["Kelewele Spot", "Omo Tuo House", "Ampesi Hub"]);
-  const refresh = () => {
-    setRefreshing(true);
-    setTimeout(() => {
-      setItems((arr) => ["New Pop-Up Café", ...arr]);
-      setRefreshing(false);
-    }, 900);
-  };
-  return (
-    <Card style={{ padding: 0 }}>
-      <View style={{ padding: 20, paddingBottom: 0 }}>
-        <SectionTitle>Pull-to-Refresh</SectionTitle>
-        <Text style={{ color: theme.muted, marginBottom: 10 }}>
-          Natural mobile gesture to fetch newest places.
-        </Text>
-      </View>
-      <ScrollView
-        style={{ maxHeight: 240 }}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={refresh} tintColor={theme.primary} />}
-        contentContainerStyle={{ padding: 20, paddingTop: 12 }}
-      >
-        {items.map((t) => (
-          <View
-            key={t}
-            style={{
-              backgroundColor: theme.surface2,
-              padding: 12,
-              borderRadius: 12,
-              borderWidth: 1,
-              borderColor: "#1f2937",
-              marginBottom: 10,
-            }}
-          >
-            <Text style={{ color: theme.text }}>{t}</Text>
-          </View>
-        ))}
-      </ScrollView>
-    </Card>
+function allSeenForMood(user: UserPrefs, mood: Mood) {
+  const ratedIds = new Set(
+    Object.keys(user.affinity[mood]).filter((rid) => user.counts[mood][rid] > 0)
   );
+  return ratedIds;
 }
 
-// 7) Bottom Sheet (pure RN)
-function PageBottomSheet() {
-  const [open, setOpen] = useState(false);
-  const y = useRef(new Animated.Value(400)).current;
-  useEffect(() => {
-    Animated.timing(y, {
-      toValue: open ? 0 : 400,
-      duration: 220,
-      easing: Easing.out(Easing.cubic),
-      useNativeDriver: true,
-    }).start();
-  }, [open]);
+function rankForMood(
+  restaurants: Restaurant[],
+  mood: Mood,
+  user: UserPrefs,
+  limit = 12
+) {
+  // Sort by overall score first
+  const withScores = restaurants
+    .map((r) => ({ r, s: scoreForMood(r, mood, user) }))
+    .sort((a, b) => b.s - a.s);
 
-  return (
-    <Card>
-      <SectionTitle>Bottom Sheet</SectionTitle>
-      <Text style={{ color: theme.muted, marginBottom: 12 }}>Great for quick actions on a place.</Text>
-      <Pressable
-        onPress={() => setOpen(true)}
-        style={{ backgroundColor: theme.accent, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 16 }}
-      >
-        <Text style={{ color: "white", fontWeight: "700" }}>Open Sheet</Text>
-      </Pressable>
+  const seenIds = allSeenForMood(user, mood);
+  const loved = withScores.filter(({ r }) => isLoved(r.id, mood, user)).map(({ r, s }) => ({ r, s }));
+  const newToUser = withScores.filter(({ r }) => !seenIds.has(r.id)).map(({ r, s }) => ({ r, s }));
+  const seenNotLoved = withScores
+    .filter(({ r }) => seenIds.has(r.id) && !isLoved(r.id, mood, user))
+    .map(({ r, s }) => ({ r, s }));
 
-      {/* Overlay */}
-      {open && (
-        <Pressable
-          onPress={() => setOpen(false)}
-          style={{
-            position: "absolute",
-            left: 0,
-            right: 0,
-            top: 0,
-            bottom: 0,
-            backgroundColor: "rgba(0,0,0,0.35)",
-          }}
-        />
-      )}
-      {/* Sheet */}
-      <Animated.View
-        style={{
-          position: "absolute",
-          left: 0,
-          right: 0,
-          bottom: 0,
-          backgroundColor: theme.surface,
-          borderTopLeftRadius: 20,
-          borderTopRightRadius: 20,
-          padding: 16,
-          transform: [{ translateY: y }],
-        }}
-      >
-        <Text style={{ color: theme.text, fontWeight: "700", marginBottom: 10 }}>Quick Actions</Text>
-        <View style={{ flexDirection: "row", gap: 10 }}>
-          <ActionPill label="Share" color={theme.accent} />
-          <ActionPill label="Navigate" color={theme.primary} />
-          <ActionPill label="Call" color={theme.success} />
-        </View>
-      </Animated.View>
-    </Card>
-  );
-}
-const ActionPill = ({ label, color }) => (
-  <View style={{ backgroundColor: color, borderRadius: 999, paddingVertical: 8, paddingHorizontal: 12 }}>
-    <Text style={{ color: "white", fontWeight: "700" }}>{label}</Text>
-  </View>
-);
+  // Build alternating sequence: best new, best loved, then repeat; then 
+  // remaining new, then seen-not-loved.
+  const out: { r: Restaurant; s: number }[] = [];
+  let iNew = 0,
+    iLoved = 0;
+  while (out.length < limit && (iNew < newToUser.length || iLoved < loved.length)) {
+    if (iNew < newToUser.length) out.push(newToUser[iNew++]);
+    if (out.length >= limit) break;
+    if (iLoved < loved.length) out.push(loved[iLoved++]);
+  }
+  for (; out.length < limit && iNew < newToUser.length; iNew++) out.push(newToUser[iNew]);
+  for (let i = 0; out.length < limit && i < seenNotLoved.length; i++) out.push(seenNotLoved[i]);
 
-// 8) Skeleton shimmer
-function PageSkeleton() {
-  const shimmer = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.timing(shimmer, { toValue: 1, duration: 1200, useNativeDriver: true, easing: Easing.linear })
-    );
-    loop.start();
-    return () => loop.stop();
-  }, []);
-  const translateX = shimmer.interpolate({ inputRange: [0, 1], outputRange: [-200, 200] });
-  const Skel = ({ h, w, r = 10, mb = 10 }) => (
-    <View
-      style={{
-        width: w,
-        height: h,
-        borderRadius: r,
-        overflow: "hidden",
-        backgroundColor: "#1f2937",
-        marginBottom: mb,
-      }}
-    >
-      <Animated.View
-        style={{
-          width: 120,
-          height: "100%",
-          opacity: 0.4,
-          backgroundColor: "#9CA3AF",
-          transform: [{ translateX }],
-        }}
-      />
-    </View>
-  );
-
-  return (
-    <Card>
-      <SectionTitle>Skeleton Loading</SectionTitle>
-      <Text style={{ color: theme.muted, marginBottom: 10 }}>Shimmer while fetching data.</Text>
-      <Skel w="100%" h={18} />
-      <Skel w="70%" h={14} />
-      <Skel w="90%" h={14} />
-      <Skel w="60%" h={14} />
-    </Card>
-  );
+  return out;
 }
 
-// 9) Toast/Snackbar (auto-hide)
-function PageToast() {
-  const [show, setShow] = useState(false);
-  useEffect(() => {
-    if (!show) return;
-    const t = setTimeout(() => setShow(false), 1400);
-    return () => clearTimeout(t);
-  }, [show]);
-  return (
-    <Card>
-      <SectionTitle>Toast / Snackbar</SectionTitle>
-      <Text style={{ color: theme.muted, marginBottom: 12 }}>Transient confirmations.</Text>
-      <Pressable
-        onPress={() => setShow(true)}
-        style={{ backgroundColor: theme.success, borderRadius: 12, paddingVertical: 10, paddingHorizontal: 16 }}
-      >
-        <Text style={{ color: "white", fontWeight: "700" }}>Save Filters</Text>
-      </Pressable>
-
-      {show && (
-        <View
-          style={{
-            position: "absolute",
-            left: 20,
-            right: 20,
-            bottom: 16,
-            backgroundColor: "#0d1b2a",
-            borderRadius: 12,
-            padding: 12,
-            borderWidth: 1,
-            borderColor: "#1f2937",
-          }}
-        >
-          <Text style={{ color: theme.text, textAlign: "center" }}>Saved! 🎉</Text>
-        </View>
-      )}
-    </Card>
-  );
+// Predictive suggestions for the search bar
+function getSuggestions(query: string) {
+  const q = query.toLowerCase();
+  if (!q) return [] as string[];
+  const pool = Array.from(new Set([...TAGS, ...DB.flatMap((r) => [r.name, r.cuisine, ...r.tags])])).map((s) => s.toLowerCase());
+  return pool.filter((s) => s.includes(q)).slice(0, 6);
 }
 
-// 10) Theme toggle (light/dark)
-function PageTheme() {
-  const [dark, setDark] = useState(true);
-  return (
-    <Card>
-      <SectionTitle>Theme Toggle</SectionTitle>
-      <Text style={{ color: theme.muted, marginBottom: 12 }}>Preview light vs. dark surfaces.</Text>
-      <Pressable
-        onPress={() => setDark((d) => !d)}
-        style={{
-          backgroundColor: dark ? theme.accent : theme.primary,
-          borderRadius: 12,
-          paddingVertical: 10,
-          paddingHorizontal: 16,
-          alignSelf: "flex-start",
-        }}
-      >
-        <Text style={{ color: "white", fontWeight: "700" }}>{dark ? "Switch to Light" : "Switch to Dark"}</Text>
-      </Pressable>
-
-      <View style={{ height: 14 }} />
-      <View
-        style={{
-          backgroundColor: dark ? theme.surface2 : "#f3f4f6",
-          padding: 16,
-          borderRadius: 12,
-          borderWidth: 1,
-          borderColor: dark ? "#1f2937" : "#e5e7eb",
-        }}
-      >
-        <Text style={{ color: dark ? theme.text : "#111827" }}>
-          This block reflects the current theme.
-        </Text>
-      </View>
-    </Card>
-  );
+// Share (best-effort)
+async function tryShare(text: string) {
+  if (navigator.share) {
+    try {
+      await navigator.share({ title: "Orryx", text });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    alert("Link copied to clipboard");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
-// ---------- UI Guide Overlay ----------
-function GuideOverlay({ visible, onClose, pages, onJump }) {
-  return (
-    <Modal transparent visible={visible} animationType="fade">
-      <Pressable
-        style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.45)", padding: 20, justifyContent: "center" }}
-        onPress={onClose}
-      >
-        <Pressable
-          onPress={(e) => e.stopPropagation()}
-          style={{
-            backgroundColor: theme.surface,
-            borderRadius: 16,
-            padding: 18,
-            borderWidth: 1,
-            borderColor: "#1f2937",
-          }}
-        >
-          <Text style={{ color: theme.text, fontSize: 18, fontWeight: "700", marginBottom: 10 }}>
-            UI Guide — tap to jump
-          </Text>
-          {pages.map((p, i) => (
-            <Pressable
-              key={i}
-              onPress={() => {
-                onClose();
-                onJump(i);
-              }}
-              style={{
-                paddingVertical: 10,
-                paddingHorizontal: 12,
-                borderRadius: 10,
-                backgroundColor: theme.surface2,
-                marginBottom: 8,
-                borderWidth: 1,
-                borderColor: "#1f2937",
-              }}
-            >
-              <Text style={{ color: theme.text }}>
-                {i + 1}. {p.title}
-              </Text>
-            </Pressable>
-          ))}
-        </Pressable>
-      </Pressable>
-    </Modal>
-  );
-}
-
-// ---------- Shell with horizontal paging ----------
+// ————— Component —————
 export default function App() {
-  const scrollRef = useRef(null);
-  const [index, setIndex] = useState(0);
-  const [guide, setGuide] = useState(false);
+  const [user, setUser] = useLocalStorage<UserPrefs>("orryx_user_prefs_v01", DEFAULT_USER);
 
-  const pages = useMemo(
-    () => [
-      { title: "Smart Search", node: <PageSearch /> },
-      { title: "Filter Chips", node: <PageChips /> },
-      { title: "Restaurant Card", node: <PageCard /> },
-      { title: "Expandable Text", node: <PageExpandable /> },
-      { title: "Swipeable Row", node: <PageSwipeRow /> },
-      { title: "Pull-to-Refresh", node: <PageRefresh /> },
-      { title: "Bottom Sheet", node: <PageBottomSheet /> },
-      { title: "Skeleton Shimmer", node: <PageSkeleton /> },
-      { title: "Toast / Snackbar", node: <PageToast /> },
-      { title: "Theme Toggle", node: <PageTheme /> },
-    ],
-    []
-  );
+  const [tab, setTab] = useState<"random" | "foodmood" | "findit">("random");
+  const [currentMood, setCurrentMood] = useState<Mood>("Joy");
+  const [desiredMood, setDesiredMood] = useState<Mood>("Joy");
+  const [reroll, setReroll] = useState<number>(0);
 
-  const jumpTo = (i) => {
-    setIndex(i);
-    scrollRef.current?.scrollTo({ x: i * SCREEN_W, animated: true });
+  const [search, setSearch] = useState("");
+  const [searchTag, setSearchTag] = useState<string | null>(null);
+  const [showSheet, setShowSheet] = useState<null | "rate" | "chooseMood">(null);
+
+  const [activeOrderRid, setActiveOrderRid] = useState<string | null>(null);
+
+  // dynamic ranking target mood for Random page
+  const targetMoodRandom = reroll % 2 === 0 ? currentMood : desiredMood;
+
+  const rankedRandom = useMemo(() => rankForMood(DB, targetMoodRandom, user, 8), [user, targetMoodRandom]);
+  const rankedFoodMood = useMemo(() => rankForMood(DB, desiredMood, user, 8), [user, desiredMood]);
+
+  const filteredFind = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const tag = searchTag?.toLowerCase();
+    const base = DB.filter((r) => {
+      const hay = [r.name, r.cuisine, ...r.tags].join("| ").toLowerCase();
+      const tagHit = tag ? r.tags.map((t) => t.toLowerCase()).includes(tag) : true;
+      return (!q || hay.includes(q)) && tagHit;
+    });
+    // sort by blended best across moods (favor Joy by default)
+    const withS = base.map((r) => {
+      const sAvg = MOODS.reduce((acc, m) => acc + scoreForMood(r, m, user), 0) / MOODS.length;
+      const sJoy = scoreForMood(r, "Joy", user);
+      return { r, s: 0.6 * sJoy + 0.4 * sAvg };
+    });
+    return withS.sort((a, b) => b.s - a.s).slice(0, 12);
+  }, [search, searchTag, user]);
+
+  // UX helpers
+  const onPlaceOrder = (rid: string) => {
+    setActiveOrderRid(rid);
   };
 
+  const onDidEat = () => setShowSheet("rate");
+
+  const onSubmitRating = (mood: Mood) => {
+    if (!activeOrderRid) return;
+    const next = updateAffinity(user, activeOrderRid, mood, 0.3);
+    setUser(next);
+    setShowSheet(null);
+    setActiveOrderRid(null);
+  };
+
+  const toggleFavorite = (rid: string) => {
+    const next = { ...user, favorites: new Set(user.favorites), seen: new Set(user.seen) };
+    if (next.favorites.has(rid)) next.favorites.delete(rid);
+    else next.favorites.add(rid);
+    setUser(next);
+  };
+
+  const predictive = getSuggestions(search);
+
+  // Themes (3 archetypes)
+  const [theme, setTheme] = useLocalStorage("orryx_theme_v01", "engineer");
+  const themeClass =
+    theme === "engineer"
+      ? "from-slate-900 via-slate-800 to-slate-900 text-slate-100"
+      : theme === "soldier"
+      ? "from-emerald-900 via-emerald-800 to-emerald-900 text-emerald-50"
+      : "from-indigo-900 via-purple-900 to-indigo-900 text-indigo-50"; // dreamer
+
   return (
-    <SafeAreaView style={{ flex: 1, backgroundColor: theme.bg }}>
-      <StatusBar barStyle="light-content" />
-      <View style={{ paddingHorizontal: 20, paddingTop: 8, paddingBottom: 10, flexDirection: "row", alignItems: "center" }}>
-        <Text style={{ color: theme.text, fontSize: 22, fontWeight: "800", flex: 1 }}>Orryx UI Lab</Text>
-        <Pressable
-          onPress={() => setGuide(true)}
-          style={{
-            backgroundColor: theme.accent,
-            borderRadius: 999,
-            paddingVertical: 8,
-            paddingHorizontal: 14,
-          }}
-        >
-          <Text style={{ color: "white", fontWeight: "700" }}>UI Guide</Text>
-        </Pressable>
-      </View>
+    <div className={`min-h-screen w-full bg-gradient-to-b ${themeClass} pb-28`}>
+      <Header theme={theme} setTheme={setTheme as any} />
 
-      <ScrollView
-        ref={scrollRef}
-        horizontal
-        pagingEnabled
-        showsHorizontalScrollIndicator={false}
-        onMomentumScrollEnd={(e) => {
-          const i = Math.round(e.nativeEvent.contentOffset.x / SCREEN_W);
-          setIndex(i);
-        }}
-      >
-        {pages.map((p, i) => (
-          <View key={i} style={{ width: SCREEN_W, padding: 20 }}>
-            {p.node}
-          </View>
-        ))}
-      </ScrollView>
+      {/* Tab Switcher */}
+      <div className="mx-auto mt-4 flex w-full max-w-5xl items-center justify-center gap-2 px-4">
+        <Tab label="Random" active={tab === "random"} onClick={() => setTab("random")} />
+        <Tab label="Food‑Mood" active={tab === "foodmood"} onClick={() => setTab("foodmood")} />
+        <Tab label="Find It" active={tab === "findit"} onClick={() => setTab("findit")} />
+      </div>
 
-      {/* Pagination dots */}
-      <View style={{ flexDirection: "row", justifyContent: "center", gap: 6, paddingVertical: 10 }}>
-        {pages.map((_, i) => (
-          <View
-            key={i}
-            style={{
-              width: i === index ? 22 : 8,
-              height: 8,
-              borderRadius: 999,
-              backgroundColor: i === index ? theme.dotActive : theme.dot,
-            }}
+      {tab === "random" && (
+        <section className="mx-auto mt-6 w-full max-w-5xl px-4">
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <MoodPill label="Your Mood" value={currentMood} onPick={() => setShowSheet("chooseMood")} />
+            <MoodPill label="Desired Mood (on re‑roll)" value={desiredMood} onPick={() => setShowSheet("chooseMood")} />
+            <button
+              onClick={() => setReroll((n) => n + 1)}
+              className="rounded-2xl border border-white/20 px-4 py-2 text-sm font-semibold shadow hover:bg-white/10"
+            >
+              Re‑roll (now matching: <span className="underline">{targetMoodRandom}</span>)
+            </button>
+            <p className="text-xs opacity-80">
+              Rule: first match current mood; on first re‑roll, match desired mood instead.
+            </p>
+          </div>
+          <CardGrid
+            items={rankedRandom}
+            user={user}
+            onFav={toggleFavorite}
+            onShare={(r) => tryShare(`${r.name} — ${r.cuisine} @ ${r.location}`)}
+            onOrder={(rid) => onPlaceOrder(rid)}
           />
-        ))}
-      </View>
 
-      {/* UI Guide overlay */}
-      <GuideOverlay visible={guide} onClose={() => setGuide(false)} pages={pages} onJump={jumpTo} />
-    </SafeAreaView>
+          {activeOrderRid && (
+            <div className="mt-4 flex items-center gap-3">
+              <button
+                onClick={onDidEat}
+                className="rounded-xl bg-white/90 px-4 py-2 text-sm font-bold text-black shadow hover:bg-white"
+              >
+                Did you eat?
+              </button>
+              <span className="text-sm opacity-80">Tap after your meal to rate how it made you feel.</span>
+            </div>
+          )}
+        </section>
+      )}
+
+      {tab === "foodmood" && (
+        <section className="mx-auto mt-6 w-full max-w-5xl px-4">
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <MoodPill label="I want to feel" value={desiredMood} onPick={() => setShowSheet("chooseMood")} />
+            <span className="text-xs opacity-80">Top picks prioritize new-to-you first, then your loved spots (alternating).</span>
+          </div>
+          <CardGrid
+            items={rankedFoodMood}
+            user={user}
+            onFav={toggleFavorite}
+            onShare={(r) => tryShare(`${r.name} — ${r.cuisine} @ ${r.location}`)}
+            onOrder={(rid) => onPlaceOrder(rid)}
+          />
+
+          {activeOrderRid && (
+            <div className="mt-4 flex items-center gap-3">
+              <button
+                onClick={onDidEat}
+                className="rounded-xl bg-white/90 px-4 py-2 text-sm font-bold text-black shadow hover:bg-white"
+              >
+                Did you eat?
+              </button>
+              <span className="text-sm opacity-80">After eating, report your mood to personalize future results.</span>
+            </div>
+          )}
+        </section>
+      )}
+
+      {tab === "findit" && (
+        <section className="mx-auto mt-6 w-full max-w-5xl px-4">
+          <div className="mb-3">
+            <div className="relative">
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="Type a food, place, or tag (try ‘steak’, ‘sushi’, ‘ramen’)…"
+                className="w-full rounded-2xl border border-white/15 bg-white/10 px-4 py-3 backdrop-blur placeholder-white/60 focus:outline-none"
+              />
+              {search && predictive.length > 0 && (
+                <div className="absolute z-20 mt-1 w-full overflow-hidden rounded-xl border border-white/20 bg-black/80 backdrop-blur">
+                  {predictive.map((s) => (
+                    <button
+                      key={s}
+                      className="block w-full px-4 py-2 text-left text-sm hover:bg-white/10"
+                      onClick={() => setSearch(s)}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="mb-4 flex flex-wrap gap-2">
+            {TAGS.map((t) => (
+              <button
+                key={t}
+                onClick={() => setSearchTag(searchTag === t ? null : t)}
+                className={`rounded-2xl border px-3 py-1 text-xs ${
+                  searchTag === t ? "border-white bg-white text-black" : "border-white/20 hover:bg-white/10"
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+            {searchTag && (
+              <button onClick={() => setSearchTag(null)} className="rounded-2xl border border-white/30 px-3 py-1 text-xs opacity-80">
+                clear tag
+              </button>
+            )}
+          </div>
+
+          <CardGrid
+            items={filteredFind}
+            user={user}
+            onFav={toggleFavorite}
+            onShare={(r) => tryShare(`${r.name} — ${r.cuisine} @ ${r.location}`)}
+            onOrder={(rid) => onPlaceOrder(rid)}
+          />
+
+          {activeOrderRid && (
+            <div className="mt-4 flex items-center gap-3">
+              <button
+                onClick={onDidEat}
+                className="rounded-xl bg-white/90 px-4 py-2 text-sm font-bold text-black shadow hover:bg-white"
+              >
+                Did you eat?
+              </button>
+              <span className="text-sm opacity-80">Tap to record how the meal made you feel.</span>
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* Bottom Sheets */}
+      {showSheet === "chooseMood" && (
+        <Sheet onClose={() => setShowSheet(null)} title="Pick a mood">
+          <div className="flex flex-wrap gap-2">
+            {MOODS.map((m) => (
+              <button
+                key={m}
+                onClick={() => {
+                  setDesiredMood(m);
+                  setCurrentMood(m);
+                  setShowSheet(null);
+                }}
+                className="rounded-2xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10"
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+        </Sheet>
+      )}
+
+      {showSheet === "rate" && (
+        <Sheet onClose={() => setShowSheet(null)} title="How did your meal make you feel?">
+          <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-3">
+            {MOODS.map((m) => (
+              <button
+                key={m}
+                onClick={() => onSubmitRating(m)}
+                className="rounded-2xl border border-white/20 px-3 py-3 text-sm font-semibold hover:bg-white/10"
+              >
+                {m}
+              </button>
+            ))}
+          </div>
+          <p className="text-xs opacity-70">Submitting updates your personal algorithm. Loved spots rise; results alternate loved / new so you never get bored.</p>
+        </Sheet>
+      )}
+
+      <footer className="fixed bottom-0 left-0 right-0 bg-black/40 py-3 backdrop-blur">
+        <div className="mx-auto flex w-full max-w-5xl items-center justify-between px-4 text-xs opacity-80">
+          <div>Orryx UI Lab • Food•Mood Demo</div>
+          <div className="flex items-center gap-2">
+            <span>Theme:</span>
+            <select
+              value={theme as any}
+              onChange={(e) => setTheme(e.target.value)}
+              className="rounded-lg bg-white/10 px-2 py-1"
+            >
+              <option value="engineer">Engineer</option>
+              <option value="soldier">Soldier</option>
+              <option value="dreamer">Dreamer</option>
+            </select>
+          </div>
+        </div>
+      </footer>
+    </div>
+  );
+}
+
+// ————— UI Atoms —————
+function Header({ theme, setTheme }: { theme: string; setTheme: (v: string) => void }) {
+  return (
+    <header className="mx-auto flex w-full max-w-5xl items-center justify-between px-4 pt-6">
+      <div>
+        <h1 className="text-2xl font-extrabold tracking-tight">Orryx</h1>
+        <p className="text-sm opacity-80">A food finder that helps you feel good.</p>
+      </div>
+      <div className="flex items-center gap-2">
+        <button
+          className="rounded-xl border border-white/20 px-3 py-2 text-xs hover:bg-white/10"
+          onClick={() => tryShare("Check out Orryx – Food•Mood demo")}
+        >
+          Share
+        </button>
+      </div>
+    </header>
+  );
+}
+
+function Tab({ label, active, onClick }: { label: string; active?: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-full px-4 py-2 text-sm font-semibold shadow ${
+        active ? "bg-white text-black" : "border border-white/20 hover:bg-white/10"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function MoodPill({ label, value, onPick }: { label: string; value: Mood; onPick: () => void }) {
+  return (
+    <button onClick={onPick} className="flex items-center gap-2 rounded-2xl border border-white/20 px-3 py-2 text-sm hover:bg-white/10">
+      <span className="opacity-80">{label}:</span> <span className="font-semibold">{value}</span>
+    </button>
+  );
+}
+
+function CardGrid({
+  items,
+  user,
+  onFav,
+  onShare,
+  onOrder,
+}: {
+  items: { r: Restaurant; s: number }[];
+  user: UserPrefs;
+  onFav: (rid: string) => void;
+  onShare: (r: Restaurant) => void | Promise<void>;
+  onOrder: (rid: string) => void;
+}) {
+  if (items.length === 0)
+    return <div className="rounded-xl border border-white/15 p-6 text-sm opacity-80">No matches yet. Try another mood, search, or tag.</div>;
+  return (
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      {items.map(({ r, s }) => (
+        <RestaurantCard key={r.id} r={r} score={s} user={user} onFav={onFav} onShare={onShare} onOrder={onOrder} />)
+      )}
+    </div>
+  );
+}
+
+function RestaurantCard({
+  r,
+  score,
+  user,
+  onFav,
+  onShare,
+  onOrder,
+}: {
+  r: Restaurant;
+  score: number;
+  user: UserPrefs;
+  onFav: (rid: string) => void;
+  onShare: (r: Restaurant) => void | Promise<void>;
+  onOrder: (rid: string) => void;
+}) {
+  const lovedBadges = MOODS.filter((m) => isLoved(r.id, m, user));
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="group overflow-hidden rounded-2xl border border-white/15 bg-white/5">
+      <div className="h-28 w-full bg-gradient-to-r from-white/10 to-white/5" />
+      <div className="space-y-2 p-4">
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <div className="text-sm opacity-80">{r.cuisine} • {r.price} • {r.location}</div>
+            <h3 className="text-lg font-bold leading-tight">{r.name}</h3>
+          </div>
+          <button
+            onClick={() => onFav(r.id)}
+            className={`rounded-full px-3 py-1 text-xs font-semibold ${
+              user.favorites.has(r.id) ? "bg-white text-black" : "border border-white/20 hover:bg-white/10"
+            }`}
+          >
+            {user.favorites.has(r.id) ? "Saved" : "Save"}
+          </button>
+        </div>
+        {lovedBadges.length > 0 && (
+          <div className="flex flex-wrap items-center gap-1">
+            <span className="rounded-full border border-pink-300/30 px-2 py-0.5 text-[10px] uppercase tracking-wide text-pink-200/90">TEST‑ONLY</span>
+            {lovedBadges.map((m) => (
+              <span key={m} className="rounded-full border border-white/20 px-2 py-0.5 text-[10px] uppercase tracking-wide">
+                Loved for {m}
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="flex flex-wrap items-center gap-1">
+          {r.tags.map((t) => (
+            <span key={t} className="rounded-full border border-white/15 px-2 py-0.5 text-[10px] opacity-80">{t}</span>
+          ))}
+        </div>
+        <div className="mt-2 flex items-center justify-between">
+          <div className="text-xs opacity-70">match: {toPct(score)}</div>
+          <div className="flex items-center gap-2">
+            <button onClick={() => onShare(r)} className="rounded-xl border border-white/20 px-3 py-1 text-xs hover:bg-white/10">Share</button>
+            <button onClick={() => onOrder(r.id)} className="rounded-xl bg-white px-3 py-1 text-xs font-bold text-black hover:bg-white/90">Place fake order</button>
+          </div>
+        </div>
+
+        {/* DEV / TEST‑ONLY: Expandable mood details */}
+        <div className="mt-2">
+          <button
+            onClick={() => setOpen((v) => !v)}
+            className="w-full rounded-xl border border-white/20 px-3 py-2 text-xs font-semibold hover:bg-white/10"
+          >
+            {open ? "Hide" : "Show"} details – exact mood values
+          </button>
+          {open && (
+            <div className="mt-2 rounded-xl border border-white/15 bg-black/30 p-3 text-xs">
+              <div className="mb-1 opacity-70">Base scores, learned affinity, blended score, counts & loved flag.</div>
+              <div className="grid grid-cols-5 gap-2 font-mono">
+                <div className="opacity-70">Mood</div>
+                <div className="opacity-70">Base</div>
+                <div className="opacity-70">Affinity</div>
+                <div className="opacity-70">Blended</div>
+                <div className="opacity-70">Count/Loved</div>
+                {MOODS.map((m) => {
+                  const base = r.moodScores[m];
+                  const a = user.affinity[m][r.id] ?? 0;
+                  const blended = scoreForMood(r, m, user);
+                  const c = user.counts[m][r.id] ?? 0;
+                  const loved = isLoved(r.id, m, user);
+                  return (
+                    <React.Fragment key={m}>
+                      <div>{m}</div>
+                      <div>{base.toFixed(2)}</div>
+                      <div>{a.toFixed(2)}</div>
+                      <div>{blended.toFixed(2)}</div>
+                      <div>{c} {loved ? "✓" : ""}</div>
+                    </React.Fragment>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Sheet({ title, children, onClose }: { title: string; children: React.ReactNode; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div className="fixed inset-0 z-50 flex items-end justify-center">
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className="relative w-full max-w-2xl rounded-t-3xl border border-white/15 bg-gradient-to-b from-black/60 to-black/80 p-4 backdrop-blur">
+        <div className="mb-3 flex items-center justify-between">
+          <h4 className="text-sm font-bold uppercase tracking-wider opacity-90">{title}</h4>
+          <button onClick={onClose} className="rounded-lg border border-white/20 px-2 py-1 text-xs hover:bg-white/10">Close</button>
+        </div>
+        {children}
+      </div>
+    </div>
   );
 }
