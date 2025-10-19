@@ -6,30 +6,37 @@ on:
 jobs:
   build-android-internal:
     runs-on: ubuntu-latest
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Detect project directory (package.json)
+      # Detect where package.json lives (works even if nested)
+      - name: Detect project directory
         id: detect
         run: |
           set -e
-          echo "Workspace: $GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
           FILE=$(git ls-files -- ':/*package.json' | head -n1 || true)
           if [ -z "$FILE" ]; then
             echo "::error::package.json not found anywhere in repo."
             exit 1
           fi
           DIR=$(dirname "$FILE")
-          echo "Found package.json at: $FILE"
           echo "PROJECT_DIR=$DIR" >> $GITHUB_ENV
+          echo "Detected project dir: $DIR"
           ls -la "$DIR"
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '20'
+
+      # ✅ Install and cache EAS CLI + authenticate with your token
+      - name: Setup Expo/EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
 
       - name: Install dependencies
         working-directory: ${{ env.PROJECT_DIR }}
@@ -53,29 +60,15 @@ jobs:
         working-directory: ${{ env.PROJECT_DIR }}
         run: npx --yes expo-doctor
 
-      # Early fail if EXPO_TOKEN is not configured on this repo
-      - name: Verify EXPO_TOKEN is present
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: |
-          if [ -z "$EXPO_TOKEN" ]; then
-            echo "::error::EXPO_TOKEN secret is missing. Add it in GitHub → Settings → Secrets → Actions."
-            exit 1
-          fi
-
       - name: EAS Build (Android internal APK)
         working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: npx --yes eas-cli@latest build -p android --profile internal --non-interactive
+        run: eas build -p android --profile internal --non-interactive
 
       - name: Download latest build artifact
         working-directory: ${{ env.PROJECT_DIR }}
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
           mkdir -p dist
-          npx --yes eas-cli@latest build:download --platform android --latest --output dist/
+          eas build:download --platform android --latest --output dist/
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
